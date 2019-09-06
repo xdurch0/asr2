@@ -1,0 +1,8 @@
+csv_path,/data/corpus2.csv
+array_dir,/data/cache/English2
+vocab_path,/data/vocab2
+n_freqs,128
+window_size,400
+hop_length,160
+normalize,False
+resample_rate,0
