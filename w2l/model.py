@@ -4,13 +4,18 @@ import tensorflow as tf
 import tensorflow.keras.layers as layers
 
 
-def make_w2l_model(vocab_size, data_format):
+# TODO could avoid lots of arguments by defining a class instead...
+
+
+def make_w2l_model(vocab_size, n_channels, data_format):
     """Creates a Keras model that does the W2L forward computation.
 
     Just goes from mel spectrogram input to logits output.
 
     Parameters:
         data_format: channels_first or channels_last.
+        n_channels: How many input channels to expect, so we can specify this
+                      to the model.
         vocab_size: Size of the vocabulary. Output layer will have this size + 1
                     for the blank label.
 
@@ -59,26 +64,45 @@ def make_w2l_model(vocab_size, data_format):
         layers.Conv1D(vocab_size + 1, 1, 1, "same", data_format)
         ]
 
-    return tf.keras.Sequential(layer_list, name="w2l")
+    #w2l = tf.keras.Sequential(layer_list, name="w2l")
+
+    inp = tf.keras.Input((n_channels, None) if data_format == "channels_first"
+                         else (None, n_channels))
+    layer_outputs = [inp]
+    for layer in layer_list:
+        layer_outputs.append(layer(layer_outputs[-1]))
+    # only include relu layers in outputs
+    relevant = layer_outputs[3::3] + [layer_outputs[-1]]
+
+    w2l = tf.keras.Model(inputs=inp, outputs=relevant)
+
+    return w2l
 
 
-def w2l_forward(features, model, data_format):
+def w2l_forward(features, model, data_format, return_all=False):
     """Simple forward pass of a W2L model to compute logits.
 
     Parameters:
         features: Dict of features as returned by the tf dataset.
         model: tf.keras.Sequential model to transform spectrograms to logits.
         data_format: channels_first/last.
+        return_all: Bool, if true, return list of all layer activations
+                    (post-relu), with the logits at the very end.
 
     Returns:
-        Result of applying model to audio.
+        Result of applying model to audio (list or tensor depending on
+        return_all).
 
     """
     audio = features["audio"]
     if data_format == "channels_last":
         audio = tf.transpose(audio, [0, 2, 1])
 
-    return model(audio)
+    out = model(audio)
+    if return_all:
+        return out
+    else:
+        return out[-1]
 
 
 def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
@@ -90,11 +114,13 @@ def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
         model: tf.keras.Sequential model to transform spectrograms to logits.
         optimizer: Optimizer instance to do training with.
         data_format: channels_first/last.
-        on_gpu: Bool, whether to run on GPU. This changes how the transcriptions
-                are handled.
+        on_gpu: Bool, whether running on GPU. This changes how the
+                transcriptions are handled.
+
+    Returns:
+        Loss value.
 
     """
-
     audio, audio_lengths = features["audio"], features["length"]
     transcrs, transcr_lengths = labels["transcriptions"], labels["length"]
     if data_format == "channels_last":
@@ -127,13 +153,35 @@ def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
     grads = tape.gradient(ctc_loss, model.trainable_variables)
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
 
+    return ctc_loss
+
 
 def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
                    model_dir):
+    """Full training logic for W2L.
+
+    Parameters:
+        dataset: tf.data.Dataset as produced in input.py.
+        model: Callable (keras) model.
+        steps: Number of training steps.
+        data_format: channels_first/last.
+        adam_params: List/tuple of four parameters for Adam: learning rate,
+                     beta1, beta2, epsilon.
+        on_gpu: Bool, whether running on a GPU.
+        model_dir: Directory to store the model to.
+
+    """
+    step = 0
     data_step_limited = dataset.take(steps)
     opt = tf.optimizers.Adam(*adam_params)
+
+    graph_train = tf.function(w2l_train_step)
     for features, labels in data_step_limited:
-        w2l_train_step(features, labels, model, opt, data_format, on_gpu)
+        ctc = graph_train(features, labels, model, opt, data_format, on_gpu)
+        if not step % 500:
+            print("Step: {}. CTC: {}".format(step, ctc.numpy()))
+        step += 1
+
     # TODO store the model regularly or something? lol
     model.save(os.path.join(model_dir, "final.h5"))
 
@@ -211,3 +259,34 @@ def dense_to_sparse(dense_tensor, sparse_val=0):
                                out_type=tf.int64)
         return tf.SparseTensor(sparse_inds, sparse_vals, dense_shape)
 
+
+def get_local_gradients(features, model, data_format, target_ind=None):
+    layer_list = model.layers[1:]  # exclude input layer
+    channel_ax = 1 if data_format == "channels_first" else -1
+
+    audio = features["audio"]
+
+    if data_format == "channels_last":
+        audio = tf.transpose(audio, [0, 2, 1])
+
+    results_list = [audio]
+    with tf.GradientTape(watch_accessed_variables=False) as tape:
+        for layer in layer_list:
+            tape.watch(results_list[-1])
+            results_list.append(layer(results_list[-1]))
+    logits = results_list[-1]
+
+    # TODO pick out "center frame" or something?
+    if data_format == "channels_first":
+        logits = logits[:, :, 0]
+    else:
+        logits = logits[:, 0, :]
+    # pick only requested character if there is one
+    # logits is then 1D (batch size)
+    if target_ind:
+        logits = logits[:, target_ind]
+    # TODO make sure we actually know what the outputs are
+    # look into tape.gradient/jacobian for several examples
+
+    # gradient of logits wrt all layers except the logit layer itself
+    grads = tape.gradient(logits, results_list[:-1])

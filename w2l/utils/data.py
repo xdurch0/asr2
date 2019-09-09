@@ -4,7 +4,7 @@ import numpy as np
 
 DATA_CONFIG_EXPECTED_ENTRIES = {
     "csv_path", "array_dir", "vocab_path", "n_freqs", "window_size",
-    "hop_length", "normalize, resample_rate"}
+    "hop_length", "normalize", "resample_rate"}
 DATA_CONFIG_INT_ENTRIES = {"n_freqs", "window_size", "hop_length",
                            "resample_rate"}
 DATA_CONFIG_BOOL_ENTRIES = {"normalize"}

@@ -2,7 +2,8 @@ import os
 
 import tensorflow as tf
 
-from .utils.data import read_data_config, extract_transcriptions
+from .utils.data import read_data_config
+from .utils.errors import letter_error_rate_corpus, word_error_rate_corpus
 from .utils.vocab import parse_vocab
 from .model import make_w2l_model, w2l_train_full, w2l_decode
 from .input import w2l_input_fn_npy
@@ -23,7 +24,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
     if os.path.isdir(model_dir):
         model = tf.keras.models.load_model(os.path.join(model_dir, "final.h5"))
     else:
-        model = make_w2l_model(len(ch_to_ind), data_format)
+        model = make_w2l_model(len(ch_to_ind), mel_freqs, data_format)
 
     if mode == "return":
         return model
@@ -36,7 +37,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
         w2l_train_full(dataset, model, steps, data_format, adam_params,
                        False, model_dir)
 
-    elif mode == "predict":
+    elif mode == "predict" or mode == "errors":
         def gen():
             for features, labels in dataset:
                 pred_batch = w2l_decode(features, model, data_format).numpy()
@@ -56,4 +57,15 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
                     predictions_repacked["true"] = true_ch
                     yield predictions_repacked
 
-        return gen
+    if mode == "predict":
+        return gen()
+
+    if mode == "errors":
+        true = []
+        predicted = []
+        for p in gen():
+            true.append(p["true"])
+            predicted.append(p["decoding"][0])
+        ler = letter_error_rate_corpus(true, predicted)
+        wer = word_error_rate_corpus(true, predicted)
+        print("LER: {}\nWER: {}".format(ler, wer))

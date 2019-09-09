@@ -54,7 +54,7 @@ def process_corpus(corpus_path, config_path):
         make_vocab(csv_path, vocab_path)
 
     if not os.path.isdir(array_dir) or want_overwrite:
-        print("Creating data directory {} (this might take a while...".format(
+        print("Creating data directory {} (this might take a while)...".format(
             array_dir))
         preprocess_audio(csv_path, corpus_path, array_dir, n_freqs,
                          window_size, hop_length, normalize, resample_rate)
@@ -94,7 +94,7 @@ def make_corpus_csv(base_path, out_path):
         out_path: Path you want the corpus csv to go to.
 
     """
-    print("Creating {} from {}...").format(out_path, base_path)
+    print("Creating {} from {}...".format(out_path, base_path))
 
     with open(out_path, mode="w") as corpus_csv:
         for subset in os.listdir(base_path):

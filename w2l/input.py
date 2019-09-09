@@ -68,7 +68,7 @@ def w2l_input_fn_npy(csv_path, array_base_path, which_sets, train, vocab,
             yield file_name.encode("utf-8"), transcr.encode("utf-8")
 
     data = tf.data.Dataset.from_generator(
-        gen, (tf.string, tf.string, tf.string))
+        gen, (tf.string, tf.string))
 
     if train:
         # this basically shuffles the full dataset
@@ -85,7 +85,7 @@ def w2l_input_fn_npy(csv_path, array_base_path, which_sets, train, vocab,
     # NOTE 2: changing padding value of -1 for element 5 requires changes
     # in the model as well!
     pad_shapes = ((n_freqs, -1), (), (-1,), ())
-    pad_values = (0., 0, -1, 0)
+    pad_values = (np.log(1e-11).astype(np.float32), 0, -1, 0)
     data = data.padded_batch(
         batch_size, padded_shapes=pad_shapes, padding_values=pad_values)
     map_fn = pack_inputs_in_dict
