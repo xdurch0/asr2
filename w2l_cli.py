@@ -19,6 +19,14 @@ parser.add_argument("-f", "--data_format",
                     help="Data format. Either 'channels_first' "
                          "(default, recommended for GPU) "
                          "or 'channels_last', recommended for CPU.")
+parser.add_argument("-c", "--cpu",
+                    action="store_true",
+                    help="Set this flag when running on a CPU (dear god). This "
+                         "will slightly change how transcriptions are handled "
+                         "in training. No need to pass this if you are not "
+                         "training. Note that CPU should also use "
+                         "channels_last data format (always, not just when "
+                         "training) for (supposedly) better speed.")
 
 parser.add_argument("-A", "--adam_params",
                     nargs=4,
@@ -94,7 +102,7 @@ else:
 
 out = run_asr(mode=args.mode, data_config=args.data_config,
               model_dir=args.model_dir,
-              data_format=args.data_format,
+              data_format=args.data_format, cpu=args.cpu,
               adam_params=args.adam_params, batch_size=args.batch_size,
               clipping=args.clipping, fix_lr=args.fix_lr,
               normalize=not args.normalize_off, steps=args.steps,

@@ -79,11 +79,11 @@ def make_w2l_model(vocab_size, n_channels, data_format):
     return w2l
 
 
-def w2l_forward(features, model, data_format, return_all=False):
+def w2l_forward(audio, model, data_format, return_all=False):
     """Simple forward pass of a W2L model to compute logits.
 
     Parameters:
-        features: Dict of features as returned by the tf dataset.
+        audio: Tensor of mel spectrograms, channels_first!
         model: tf.keras.Sequential model to transform spectrograms to logits.
         data_format: channels_first/last.
         return_all: Bool, if true, return list of all layer activations
@@ -94,7 +94,6 @@ def w2l_forward(features, model, data_format, return_all=False):
         return_all).
 
     """
-    audio = features["audio"]
     if data_format == "channels_last":
         audio = tf.transpose(audio, [0, 2, 1])
 
@@ -105,12 +104,11 @@ def w2l_forward(features, model, data_format, return_all=False):
         return out[-1]
 
 
-def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
+def w2l_train_step(audio, audio_length, transcrs, transcr_length, model,
+                   optimizer, data_format, on_gpu):
     """Implements train step of the W2L model.
 
     Parameters:
-        features: Dict of features as returned by the tf dataset.
-        labels: Similarly, dict of labels.
         model: tf.keras.Sequential model to transform spectrograms to logits.
         optimizer: Optimizer instance to do training with.
         data_format: channels_first/last.
@@ -121,13 +119,11 @@ def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
         Loss value.
 
     """
-    audio, audio_lengths = features["audio"], features["length"]
-    transcrs, transcr_lengths = labels["transcriptions"], labels["length"]
     if data_format == "channels_last":
         audio = tf.transpose(audio, [0, 2, 1])
 
     with tf.GradientTape() as tape:
-        logits = model(audio)
+        logits = model(audio)[-1]
         # after this we need logits in shape time x batch_size x vocab_size
         if data_format == "channels_first":  # bs x v x t -> t x bs x v
             logits_tm = tf.transpose(logits, [2, 0, 1],
@@ -136,18 +132,18 @@ def w2l_train_step(features, labels, model, optimizer, data_format, on_gpu):
             logits_tm = tf.transpose(logits, [1, 0, 2],
                                      name="logits_time_major")
 
-        audio_lengths = tf.cast(audio_lengths / 2, tf.int32)
+        audio_length = tf.cast(audio_length / 2, tf.int32)
 
         if on_gpu:
             ctc_loss = tf.reduce_mean(tf.nn.ctc_loss(
-                labels=transcrs, logits=logits_tm, label_length=transcr_lengths,
-                logit_length=audio_lengths, logits_time_major=True,
+                labels=transcrs, logits=logits_tm, label_length=transcr_length,
+                logit_length=audio_length, logits_time_major=True,
                 blank_index=0), name="avg_loss")
         else:
             transcrs_sparse = dense_to_sparse(transcrs, sparse_val=-1)
             ctc_loss = tf.reduce_mean(tf.nn.ctc_loss(
                 labels=transcrs_sparse, logits=logits_tm, label_length=None,
-                logit_length=audio_lengths, logits_time_major=True,
+                logit_length=audio_length, logits_time_major=True,
                 blank_index=0), name="avg_loss")
 
     grads = tape.gradient(ctc_loss, model.trainable_variables)
@@ -175,7 +171,16 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
     data_step_limited = dataset.take(steps)
     opt = tf.optimizers.Adam(*adam_params)
 
-    graph_train = tf.function(w2l_train_step)
+    # TODO don't hardcode this shit...
+    audio_shape = [None, 128, None] if data_format == "channels_first" \
+        else [None, None, 128]
+    train_fn = lambda w, x, y, z: w2l_train_step(
+        w, x, y, z, model, opt, data_format, on_gpu)
+    graph_train = tf.function(
+        train_fn, input_signature=[tf.TensorSpec(audio_shape, tf.float32),
+                                   tf.TensorSpec([None], tf.int32),
+                                   tf.TensorSpec([None, None], tf.int32),
+                                   tf.TensorSpec([None], tf.int32)])
     for features, labels in data_step_limited:
         ctc = graph_train(features, labels, model, opt, data_format, on_gpu)
         if not step % 500:
@@ -186,11 +191,11 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
     model.save(os.path.join(model_dir, "final.h5"))
 
 
-def w2l_decode(features, model, data_format):
+def w2l_decode(audio, audio_length, model, data_format):
     """Wrapper to decode using W2L model.
 
     Parameters:
-        features: Dict of features as returned by the tf dataset.
+        audio: Tensor of mel spectrograms, channels_first!
         model: tf.keras.Sequential model to transform spectrograms to logits.
         data_format: channels_first/last.
 
@@ -198,9 +203,9 @@ def w2l_decode(features, model, data_format):
         Sparse or dense tensor with the top predictions.
 
     """
-    logits = w2l_forward(features, model, data_format)
+    logits = w2l_forward(audio, model, data_format)
 
-    return ctc_decode_top(logits, features["length"], pad_val=-1)
+    return ctc_decode_top(logits, audio_length, pad_val=-1)
 
 
 def ctc_decode_top(logits, seq_lengths, beam_width=100, merge_repeated=False,
