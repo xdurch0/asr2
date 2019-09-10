@@ -173,6 +173,7 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
 
     """
     step = 0
+    check_freq = steps // 10
     data_step_limited = dataset.take(steps)
     opt = tf.optimizers.Adam(*adam_params)
 
@@ -181,11 +182,12 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
         else [None, None, 128]
     train_fn = lambda w, x, y, z: w2l_train_step(
         w, x, y, z, model, opt, data_format, on_gpu)
-    graph_train = tf.function(
-        train_fn, input_signature=[tf.TensorSpec(audio_shape, tf.float32),
-                                   tf.TensorSpec([None], tf.int32),
-                                   tf.TensorSpec([None, None], tf.int32),
-                                   tf.TensorSpec([None], tf.int32)])
+    #graph_train = tf.function(
+    #    train_fn, input_signature=[tf.TensorSpec(audio_shape, tf.float32),
+    #                               tf.TensorSpec([None], tf.int32),
+    #                               tf.TensorSpec([None, None], tf.int32),
+    #                               tf.TensorSpec([None], tf.int32)])
+    graph_train = train_fn
 
     start = time.time()
     for features, labels in data_step_limited:
@@ -195,6 +197,9 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
             stop = time.time()
             print("Step: {}. CTC: {}".format(step, ctc.numpy()))
             print("{} seconds passed...".format(stop-start))
+        if not step % check_freq:
+            print("Saving checkpoint...")
+            model.save(os.path.join(model_dir, str(step).zfill(6) + ".h5"))
         step += 1
 
     # TODO store the model regularly or something? lol
@@ -286,7 +291,8 @@ def get_local_gradients(features, model, data_format, target_ind=None):
         audio = tf.transpose(audio, [0, 2, 1])
 
     results_list = [audio]
-    with tf.GradientTape(watch_accessed_variables=False) as tape:
+    with tf.GradientTape(watch_accessed_variables=False,
+                         persistent=target_ind is None) as tape:
         for layer in layer_list:
             tape.watch(results_list[-1])
             results_list.append(layer(results_list[-1]))
@@ -308,7 +314,13 @@ def get_local_gradients(features, model, data_format, target_ind=None):
         grads = tape.gradient(logits, results_list[:-1])
         return list(zip(grads, results_list))
     else:
-        pass
+        all_grads = []
+        for voc_ind in range(28):
+            all_grads.append([])
+            for layer in results_list[:-1]:
+                grads = tape.batch_jacobian(logits[:, voc_ind], layer)
+                all_grads[voc_ind].append(grads)
+        return all_grads
     # TODO make sure we actually know what the outputs are
     # look into tape.gradient/jacobian for several examples
     # maybe batch_jacobian for each source separately...
