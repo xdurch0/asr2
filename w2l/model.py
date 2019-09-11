@@ -206,7 +206,8 @@ def w2l_train_full(dataset, model, steps, data_format, adam_params, on_gpu,
     model.save(os.path.join(model_dir, "final.h5"))
 
 
-def w2l_decode(audio, audio_length, model, data_format):
+def w2l_decode(audio, audio_length, model, data_format,
+               return_intermediate=False):
     """Wrapper to decode using W2L model.
 
     Parameters:
@@ -214,18 +215,36 @@ def w2l_decode(audio, audio_length, model, data_format):
         audio_length: "True" length of each audio clip.
         model: tf.keras.Sequential model to transform spectrograms to logits.
         data_format: channels_first/last.
+        return_intermediate: Bool; if true, return intermediate layer results
+                             in addition to the decodings.
 
     Returns:
         Sparse or dense tensor with the top predictions.
+        If return_intermediate is True, output is a tuple, first element being
+        the predictions and second element a list of intermediate outputs.
 
     """
-    logits = w2l_forward(audio, model, data_format)
+    forward = w2l_forward(audio, model, data_format,
+                          return_all=return_intermediate)
+    if return_intermediate:
+        logits = forward[-1]
+    else:
+        logits = forward
 
-    return ctc_decode_top(logits, audio_length, pad_val=-1)
+    if data_format == "channels_first":
+        logits = tf.transpose(logits, [2, 0, 1])
+    else:
+        logits = tf.transpose(logits, [1, 0, 2])
+
+    decoded =  ctc_decode_top(logits, audio_length, pad_val=-1)
+    if return_intermediate:
+        return decoded, forward
+    else:
+        return decoded
 
 
-def ctc_decode_top(logits, seq_lengths, beam_width=100, merge_repeated=False,
-                   pad_val=0, as_sparse=False):
+def ctc_decode_top(logits, seq_lengths, beam_width=100, pad_val=0,
+                   as_sparse=False):
     """Simpler version of ctc decoder that only returns the top result.
 
     Parameters:
@@ -233,7 +252,6 @@ def ctc_decode_top(logits, seq_lengths, beam_width=100, merge_repeated=False,
                 channels_last!!
         seq_lengths: Same.
         beam_width: Same.
-        merge_repeated: Same.
         pad_val: Value to use to pad dense tensor. No effect if as_sparse is
                  True.
         as_sparse: If True, return results as sparse tensor.
@@ -244,8 +262,7 @@ def ctc_decode_top(logits, seq_lengths, beam_width=100, merge_repeated=False,
     """
     with tf.name_scope("decoding"):
         decoded_sparse_list, _ = tf.nn.ctc_beam_search_decoder(
-            logits, seq_lengths, beam_width=beam_width, top_paths=1,
-            merge_repeated=merge_repeated)
+            logits, seq_lengths//2, beam_width=beam_width, top_paths=1)
         decoded_sparse = decoded_sparse_list[0]
         decoded_sparse = tf.cast(decoded_sparse, tf.int32)
         if as_sparse:
@@ -283,7 +300,7 @@ def dense_to_sparse(dense_tensor, sparse_val=0):
 
 def get_local_gradients(features, model, data_format, target_ind=None):
     layer_list = model.layers[1:]  # exclude input layer
-    channel_ax = 1 if data_format == "channels_first" else -1
+    time_ax = -1 if data_format == "channels_first" else 1
 
     audio = features["audio"]
 
@@ -296,33 +313,33 @@ def get_local_gradients(features, model, data_format, target_ind=None):
         for layer in layer_list:
             tape.watch(results_list[-1])
             results_list.append(layer(results_list[-1]))
-    logits = results_list[-1]
+        logits = results_list[-1]
 
-    # TODO check whether this is actually correct
-    mid_point = tf.shape(logits)[channel_ax] // 2
-    if data_format == "channels_first":
-        logits = logits[:, :, mid_point]
-    else:
-        logits = logits[:, mid_point, :]
-    # pick only requested character if there is one
-    # logits is then batch size x 1 (else batch size x vocab size)
-    if target_ind:
-        logits = logits[:, target_ind:(target_ind+1)]
-        # although logits are likely summed over the batch axis to compute
-        # the gradients, this doesn't matter since all computations are
-        # independent over this axis -- so the backprop should be correct
-        grads = tape.gradient(logits, results_list[:-1])
-        return list(zip(grads, results_list))
-    else:
-        all_grads = []
-        for voc_ind in range(28):
-            all_grads.append([])
-            for layer in results_list[:-1]:
-                grads = tape.batch_jacobian(logits[:, voc_ind], layer)
-                all_grads[voc_ind].append(grads)
-        return all_grads
+        # TODO check whether this is actually correct
+        mid_point = tf.shape(logits)[time_ax] // 2
+        if data_format == "channels_first":
+            logits = logits[:, :, mid_point]
+        else:
+            logits = logits[:, mid_point, :]
+        # pick only requested character if there is one
+        # logits is then batch size x 1 (else batch size x vocab size)
+        if target_ind:
+            logits = logits[:, target_ind:(target_ind+1)]
+            # although logits are likely summed over the batch axis to compute
+            # the gradients, this doesn't matter since all computations are
+            # independent over this axis -- so the backprop should be correct
+            with tape.stop_recording():
+                grads = tape.gradient(logits, results_list[:-1])
+                return list(zip(grads, results_list))
+        else:
+            all_grads = []
+            for voc_ind in range(28):
+                all_grads.append([])
+                for layer in results_list[:-1]:
+                    with tape.stop_recording():
+                        grads = tape.batch_jacobian(logits[:, voc_ind], layer)
+                        all_grads[voc_ind].append(grads)
+            return all_grads
     # TODO make sure we actually know what the outputs are
     # look into tape.gradient/jacobian for several examples
     # maybe batch_jacobian for each source separately...
-
-    # gradient of logits wrt all layers except the logit layer itself

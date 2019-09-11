@@ -35,6 +35,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
 
     ch_to_ind, ind_to_ch = parse_vocab(vocab_path)
     ind_to_ch[-1] = "<PAD>"
+    ind_to_ch[0] = "<BL>"
 
     if os.path.isdir(model_dir) and os.listdir(model_dir):
         model = tf.keras.models.load_model(os.path.join(model_dir, "final.h5"))
@@ -57,23 +58,29 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
     elif mode == "predict" or mode == "errors":
         def gen():
             for features, labels in dataset:
-                pred_batch = w2l_decode(features["audio"],
-                                        features["audio_length"],
-                                        model, data_format).numpy()
+                pred_batch, layer_list = w2l_decode(
+                    features["audio"], features["length"], model, data_format,
+                    return_intermediate=True)
+                pred_batch = pred_batch.numpy()
                 label_batch = labels["transcription"].numpy()
+
                 for ind in range(pred_batch.shape[0]):
                     predictions_repacked = dict()
                     predictions_repacked["input_length"] = features["length"][ind]
 
                     # remove padding and convert to chars
                     pred = pred_batch[ind]
-                    pred = [p for p in pred if p != -1]
+                    pred = [ind for ind in pred if ind != -1]
                     pred_ch = "".join([ind_to_ch[ind] for ind in pred])
                     predictions_repacked["decoding"] = pred_ch
 
-                    true = [t for t in label_batch[ind] if t != -1]
-                    true_ch = "".join([ind_to_ch[ind] for ind in true])
+                    true_ind = [t for t in label_batch[ind] if t != -1]
+                    true_ch = "".join([ind_to_ch[ind] for ind in true_ind])
                     predictions_repacked["true"] = true_ch
+
+                    predictions_repacked["all_layers"] = [layer[ind] for
+                                                          layer in layer_list]
+
                     yield predictions_repacked
 
     if mode == "predict":
