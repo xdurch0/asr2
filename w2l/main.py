@@ -89,9 +89,11 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
     if mode == "errors":
         true = []
         predicted = []
-        for p in gen():
+        for sent_ind, p in enumerate(gen(), start=1):
             true.append(p["true"])
             predicted.append(p["decoding"][0])
+            if not sent_ind % 1000:
+                print("Went through {}...".format(sent_ind))
         ler = letter_error_rate_corpus(true, predicted)
         wer = word_error_rate_corpus(true, predicted)
         print("LER: {}\nWER: {}".format(ler, wer))

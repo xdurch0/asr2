@@ -80,9 +80,9 @@ def w2l_input_fn_npy(csv_path, array_base_path, which_sets, train, vocab,
         lambda fid, trans: tuple(tf.numpy_function(
             _to_arrays, [fid, trans], output_types)),
         num_parallel_calls=3)
-    # NOTE 1: padding value of 0 for element 2 and 4 is just a dummy (since
+    # NOTE 1: padding value of 0 for element 1 and 3 is just a dummy (since
     #         sequence lengths are always scalar)
-    # NOTE 2: changing padding value of -1 for element 5 requires changes
+    # NOTE 2: changing padding value of -1 for element 2 requires changes
     # in the model as well!
     pad_shapes = ((n_freqs, -1), (), (-1,), ())
     pad_values = (np.log(1e-11).astype(np.float32), 0, -1, 0)
