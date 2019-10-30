@@ -12,7 +12,7 @@ from .input import w2l_input_fn_npy
 def run_asr(mode, data_config, model_dir, data_format="channels_first",
             cpu=False,
             adam_params=(1e-4, 0.9, 0.9, 1e-8), batch_size=16, clipping=500,
-            fix_lr=False, normalize=False, steps=300000, threshold=0.,
+            fix_lr=False, normalize=True, steps=300000, threshold=0.,
             which_sets=None):
     """
     All of these parameters can be passed from w2l_cli. Please check
