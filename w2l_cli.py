@@ -18,7 +18,7 @@ parser.add_argument("-f", "--data_format",
                     choices=["channels_first", "channels_last"],
                     help="Data format. Either 'channels_first' "
                          "(default, recommended for GPU) "
-                         "or 'channels_last', recommended for CPU.")
+                         "or 'channels_last', necessary for CPU.")
 parser.add_argument("-c", "--cpu",
                     action="store_true",
                     help="Set this flag when running on a CPU (dear god). This "
@@ -26,7 +26,12 @@ parser.add_argument("-c", "--cpu",
                          "in training. No need to pass this if you are not "
                          "training. Note that CPU should also use "
                          "channels_last data format (always, not just when "
-                         "training) for (supposedly) better speed.")
+                         "training). NOTE: "
+                         "Currently, this flag is basically always in effect "
+                         "because the CTC 'GPU mode' seems to be much slower "
+                         "than the CPU one even when running on GPU. So you "
+                         "can pass it, or not. It might do something again in "
+                         "the future.")
 
 parser.add_argument("-A", "--adam_params",
                     nargs=4,
@@ -63,8 +68,8 @@ parser.add_argument("-N", "--normalize_off",
                          "preprocessing. Check the corresponding data config.")
 parser.add_argument("-S", "--steps",
                     type=int,
-                    default=500000,
-                    help="Number of training steps to take. Default: 500000. "
+                    default=250000,
+                    help="Number of training steps to take. Default: 250000. "
                          "Ignored if doing prediction or evaluation.")
 parser.add_argument("-T", "--threshold",
                     type=float,
@@ -93,7 +98,7 @@ parser.add_argument("-W", "--which_sets",
                          "used if training, and test sets for "
                          "predicting/evaluating.")
 args = parser.parse_args()
-
+# TODO fix which_sets to not use all of them
 
 if args.which_sets:
     which_sets = args.which_sets.split(",")

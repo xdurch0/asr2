@@ -1,18 +1,14 @@
-import os
-
-import tensorflow as tf
-
 from .utils.data import read_data_config
 from .utils.errors import letter_error_rate_corpus, word_error_rate_corpus
 from .utils.vocab import parse_vocab
-from .model import make_w2l_model, w2l_train_full, w2l_decode
+from .model import W2L
 from .input import w2l_input_fn_npy
 
 
 def run_asr(mode, data_config, model_dir, data_format="channels_first",
             cpu=False,
             adam_params=(1e-4, 0.9, 0.9, 1e-8), batch_size=16, clipping=500,
-            fix_lr=False, normalize=True, steps=300000, threshold=0.,
+            fix_lr=False, normalize=True, steps=250000, threshold=0.,
             which_sets=None):
     """
     All of these parameters can be passed from w2l_cli. Please check
@@ -22,10 +18,9 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
         Depends on mode!
         If train, eval-current or eval-all: Nothing is returned.
         If predict: Returns a generator over predictions for the requested set.
-        If return: Return the estimator object. Use this if you want access to
-                   the variables or their values, for example.
-        If container: Returns a generator over predictions for the given
-                      container.
+        If return: Return the model object. Use this if you want access to
+                   the variables or their values, for example, or if you want
+                   to use the forward etc. functions yourself.
 
     """
     data_config_dict = read_data_config(data_config)
@@ -37,12 +32,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
     ind_to_ch[-1] = "<PAD>"
     ind_to_ch[0] = "<BL>"
 
-    if os.path.isdir(model_dir) and os.listdir(model_dir):
-        model = tf.keras.models.load_model(os.path.join(model_dir, "final.h5"))
-    else:
-        if not os.path.isdir(model_dir):
-            os.mkdir(model_dir)
-        model = make_w2l_model(len(ch_to_ind), mel_freqs, data_format)
+    model = W2L(model_dir, len(ch_to_ind), mel_freqs, data_format)
 
     if mode == "return":
         return model
@@ -52,14 +42,13 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
                                normalize)
 
     if mode == "train":
-        w2l_train_full(dataset, model, steps, data_format, adam_params,
-                       not cpu, model_dir)
+        model.train_full(dataset, steps, adam_params, not cpu)
 
     elif mode == "predict" or mode == "errors":
         def gen():
             for features, labels in dataset:
-                pred_batch, layer_list = w2l_decode(
-                    features["audio"], features["length"], model, data_format,
+                pred_batch, layer_list = model.decode(
+                    features["audio"], features["length"],
                     return_intermediate=True)
                 pred_batch = pred_batch.numpy()
                 label_batch = labels["transcription"].numpy()
