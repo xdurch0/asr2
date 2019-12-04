@@ -13,7 +13,8 @@ GRIDS = {16: (4, 4), 32: (8, 4), 64: (8, 8), 128: (16, 8), 256: (16, 16),
 
 
 class W2L:
-    def __init__(self, model_dir, vocab_size, n_channels, data_format, reg=None):
+    def __init__(self, model_dir, vocab_size, n_channels, data_format,
+                 reg=(None, 0.)):
         if data_format not in ["channels_first", "channels_last"]:
             raise ValueError("Invalid data type specified: {}. Use either "
                              "channels_first or channels_last.".format(data_format))
@@ -23,16 +24,22 @@ class W2L:
         self.cf = self.data_format == "channels_first"
         self.n_channels = n_channels
         self.vocab_size = vocab_size
+        self.regularizer_type = reg[0]
+        self.regularizer_coeff = reg[1]
 
         if os.path.isdir(model_dir) and os.listdir(model_dir):
+            print("Model directory already exists. Loading last model...")
+            last = self.get_last_model(model_dir)
             self.model = tf.keras.models.load_model(
-                os.path.join(model_dir, "final.h5"))
+                os.path.join(model_dir, last))
+            print("...loaded {}.".format(last))
         else:
+            print("Model directory does not exist. Creating new model...")
             if not os.path.isdir(model_dir):
                 os.mkdir(model_dir)
             self.model = self.make_w2l_model()
 
-    def make_w2l_model(self, reg=None):
+    def make_w2l_model(self):
         """Creates a Keras model that does the W2L forward computation.
 
         Just goes from mel spectrogram input to logits output.
@@ -51,8 +58,8 @@ class W2L:
         """
         channel_ax = 1 if self.cf else -1
 
-        if reg:
-            reg_target, reg_type, reg_edges, reg_size = reg.split("_")
+        if self.regularizer_type:
+            reg_target, reg_type, reg_edges, reg_size = self.regularizer_type.split("_")
             reg_fn_builder = lambda n_f: sebastians_magic_trick(
                 diff_norm=reg_type, weight_norm="l2", grid_dims=GRIDS[n_f],
                 neighbor_size=int(reg_size),
@@ -66,9 +73,9 @@ class W2L:
                 n_f, w_f, stride, padding="same", data_format=self.data_format,
                 use_bias=False,
                 kernel_regularizer=reg_fn_builder(
-                    256) if reg_target == "weight" else None,
+                    n_f) if reg_target == "weight" else None,
                 activity_regularizer=reg_fn_builder(
-                    256) if reg_target == "act" else None)
+                    n_f) if reg_target == "act" else None)
 
         layer_list = [
             reg_conv1d(256, 48, 2),
@@ -186,10 +193,18 @@ class W2L:
                     logit_length=audio_length, logits_time_major=True,
                     blank_index=0), name="avg_loss")
 
-        grads = tape.gradient(ctc_loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(grads, model.trainable_variables))
+            if self.regularizer_coeff:
+                avg_reg_loss = tf.math.add_n(self.model.losses) / len(self.model.losses)
+                loss = ctc_loss + self.regularizer_coeff * avg_reg_loss
+            else:
+                loss = ctc_loss
 
-        return ctc_loss
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+
+        #self.annealer.update_history(loss)
+
+        return loss
 
     def train_full(self, dataset, steps, adam_params, on_gpu):
         """Full training logic for W2L.
@@ -206,9 +221,10 @@ class W2L:
         # TODO more flexible checkpointing. this will simply do 10 checkpoints overall
         check_freq = steps // 10
         data_step_limited = dataset.take(steps)
+
+        #self.annealer = AnnealIfStuck(adam_params[0], 0.1, 20000)
         opt = tf.optimizers.Adam(*adam_params)
 
-        # TODO don't hardcode 128 channels...
         audio_shape = [None, self.n_channels, None] if self.cf \
             else [None, None, self.n_channels]
         train_fn = lambda w, x, y, z: self.train_step(
@@ -233,7 +249,6 @@ class W2L:
                 self.model.save(os.path.join(self.model_dir, str(step).zfill(6) + ".h5"))
             step += 1
 
-        # TODO store the model regularly or something? lol
         self.model.save(os.path.join(self.model_dir, "final.h5"))
 
     def decode(self, audio, audio_length, return_intermediate=False):
@@ -299,6 +314,64 @@ class W2L:
                                           default_value=pad_val,
                                           name="dense_decoding")
 
+    def get_last_model(self, model_dir):
+        ckpts = [file for file in os.listdir(model_dir) if file.endswith(".h5")]
+        if "final.h5" in ckpts:
+            return "final.h5"
+        else:
+            return sorted(ckpts)[-1]
+
+
+class AnnealIfStuck(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, base_lr, factor, n_steps):
+        """Anneal the learning rate if loss doesn't decrease anymore.
+
+        Refer to
+        http://blog.dlib.net/2018/02/automatic-learning-rate-scheduling-that.html.
+
+        Parameters:
+            base_lr: LR to start with.
+            factor: By what to multiply in case we're stuck.
+            n_steps: How often to check if we're stuck.
+
+        """
+        super(AnnealIfStuck, self).__init__()
+        self.n_steps = n_steps
+        self.lr = base_lr
+        self.factor = factor
+        self.loss_history = tf.Variable(
+            np.zeros(n_steps), trainable=False, dtype=tf.float32,
+            name="loss_history")
+
+    def __call__(self, step):
+        if tf.logical_or(tf.greater(tf.mod(step, self.n_steps), 0),
+                         tf.equal(step, 0)):
+            pass
+        else:
+            x1 = tf.range(self.n_steps, dtype=tf.float32, name="x")
+            x2 = tf.ones([self.n_steps], dtype=tf.float32, name="bias")
+            x = tf.stack((x1, x2), axis=1, name="input")
+            slope_bias = tf.linalg.lstsq(x, self.loss_history[:, tf.newaxis],
+                                         name="solution")
+            slope = slope_bias[0][0]
+            bias = slope_bias[1][0]
+            preds = slope * x1 + bias
+
+            data_var = 1 / (self.n_steps - 2) * tf.reduce_sum(tf.square(self.loss_history -
+                                                             preds))
+            dist_var = 12 * data_var / (self.n_steps ** 3 - self.n_steps)
+            dist = tfp.distributions.Normal(slope, tf.sqrt(dist_var),
+                                            name="slope_distribution")
+            prob_decreasing = dist.cdf(0., name="prob_below_zero")
+
+            if tf.less_equal(prob_decreasing, 0.5):
+                self.lr *= self.factor
+        return self.lr
+
+    def update_history(self, new_val):
+        self.loss_history.assign(tf.concat((self.loss_history[1:], [new_val]),
+                                           axis=0))
+
 
 def dense_to_sparse(dense_tensor, sparse_val=-1):
     """Inverse of tf.sparse_to_dense.
@@ -324,51 +397,10 @@ def dense_to_sparse(dense_tensor, sparse_val=-1):
         return tf.SparseTensor(sparse_inds, sparse_vals, dense_shape)
 
 
-def lr_annealer(lr, factor, loss_history, global_step):
-    """Anneal the learning rate if loss doesn't decrease anymore.
-    Refer to
-      http://blog.dlib.net/2018/02/automatic-learning-rate-scheduling-that.html
-    Parameters:
-        lr: Tensor containing the current learning rate.
-        factor: By what to multiply the learning rate in case of annealing.
-        loss_history: Tensor containing the last n loss values. Used to judge
-                      whether it's decreasing or not.
-        global_step: Tensor containing the global step. As it is right now,
-                     a check is only made if global step % n = 0.
-    Returns:
-        The new learning rate.
-    """
-    n = loss_history.shape.as_list()[0]
-
-    def reduce_if_slope():
-        # Evaluated every n steps. Lowers LR if slope probably >= 0
-        x1 = tf.range(n, dtype=tf.float32, name="x")
-        x2 = tf.ones([n], dtype=tf.float32, name="bias")
-        x = tf.stack((x1, x2), axis=1, name="input")
-        slope_bias = tf.linalg.lstsq(x, loss_history[:, tf.newaxis],
-                                     name="solution")
-        slope = slope_bias[0][0]
-        bias = slope_bias[1][0]
-        preds = slope * x1 + bias
-
-        data_var = 1 / (n - 2) * tf.reduce_sum(tf.square(loss_history -
-                                                         preds))
-        dist_var = 12 * data_var / (n ** 3 - n)
-        dist = tfp.distributions.Normal(slope, tf.sqrt(dist_var),
-                                        name="slope_distribution")
-        prob_decreasing = dist.cdf(0.,  name="prob_below_zero")
-        return tf.cond(tf.less_equal(prob_decreasing, 0.5),
-                       true_fn=lambda: lr * factor,
-                       false_fn=lambda: lr)
-
-    return tf.cond(tf.logical_or(
-        tf.greater(tf.mod(global_step, n), 0), tf.equal(global_step, 0)),
-        true_fn=lambda: lr, false_fn=reduce_if_slope)
-
-
 def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
                            cf, edges):
     """Creates a neighborhood distance regularizer.
+
     Parameters:
         diff_norm: How to compute differences/distances between filters.
                    Can be "l1", "l2" or "linf" for respective norms, or "cos"
@@ -386,6 +418,7 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
             be true if we are regularizing activation maps, not filter weights,
             and channels_first data format is used.
         edges: String, how to treat edges. See CLI file for options.
+
     """
     if not neighbor_size % 2:
         raise ValueError("Neighborhood is not odd; this would mean no middle "

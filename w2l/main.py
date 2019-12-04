@@ -6,7 +6,7 @@ from .input import w2l_input_fn_npy
 
 
 def run_asr(mode, data_config, model_dir, data_format="channels_first",
-            cpu=False,
+            cpu=False, reg=(None, 0.),
             adam_params=(1e-4, 0.9, 0.9, 1e-8), batch_size=16, clipping=500,
             fix_lr=False, normalize=True, steps=250000, threshold=0.,
             which_sets=None):
@@ -31,6 +31,12 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
     ch_to_ind, ind_to_ch = parse_vocab(vocab_path)
     ind_to_ch[-1] = "<PAD>"
     ind_to_ch[0] = "<BL>"
+
+    try:
+        reg = (reg[0], float(reg[1]))  # tuples are immutable...
+    except (ValueError, TypeError):
+        raise ValueError("Could not convert regularization coefficient '{}' "
+                         "to float.".format(reg[1]))
 
     model = W2L(model_dir, len(ch_to_ind), mel_freqs, data_format)
 

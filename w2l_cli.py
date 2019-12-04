@@ -32,6 +32,21 @@ parser.add_argument("-c", "--cpu",
                          "than the CPU one even when running on GPU. So you "
                          "can pass it, or not. It might do something again in "
                          "the future.")
+parser.add_argument("-r", "--reg",
+                    nargs=2,
+                    default=[None, "0.0"],
+                    metavar=["reg_type", "reg_coeff"],
+                    help="Which regularizer to use and the coefficient. The "
+                         "type is multiple things separated by underscores:"
+                         "target_norm_edges_nhsize. Target should be weight or "
+                         "act depending on whether to apply the regularizer to "
+                         "the filter weights or the feature maps. norm is "
+                         "which distance measure to use: l1, l2, linf or cos. "
+                         "edges is how to treat edges: no (no special treatment), "
+                         "occ (weight inversely to occurrences) or wrap (wrap "
+                         "around the grid). nhsize is how big the neighborhoods "
+                         "should be. Uneven numbers >= 3! Default: "
+                         "No regularization.")
 
 parser.add_argument("-A", "--adam_params",
                     nargs=4,
@@ -94,11 +109,8 @@ parser.add_argument("-T", "--threshold",
 parser.add_argument("-W", "--which_sets",
                     default="",
                     help="Which data subsets to use. Pass as comma-separated "
-                         "string. If not given, train and dev sets will be "
-                         "used if training, and test sets for "
-                         "predicting/evaluating.")
+                         "string. If not given, everything will be used!!")
 args = parser.parse_args()
-# TODO fix which_sets to not use all of them
 
 if args.which_sets:
     which_sets = args.which_sets.split(",")
