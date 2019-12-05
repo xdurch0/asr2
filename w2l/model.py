@@ -17,15 +17,18 @@ class W2L:
                  reg=(None, 0.)):
         if data_format not in ["channels_first", "channels_last"]:
             raise ValueError("Invalid data type specified: {}. Use either "
-                             "channels_first or channels_last.".format(data_format))
+                             "channels_first or "
+                             "channels_last.".format(data_format))
 
         self.model_dir = model_dir
+        self.writer = tf.summary.create_file_writer(model_dir)
         self.data_format = data_format
         self.cf = self.data_format == "channels_first"
         self.n_channels = n_channels
         self.vocab_size = vocab_size
         self.regularizer_type = reg[0]
         self.regularizer_coeff = reg[1]
+        self.step = 0  # TODO store this and load if resuming training
 
         if os.path.isdir(model_dir) and os.listdir(model_dir):
             print("Model directory already exists. Loading last model...")
@@ -44,12 +47,6 @@ class W2L:
 
         Just goes from mel spectrogram input to logits output.
 
-        Parameters:
-            vocab_size: Size of the vocabulary. Output layer will have this size + 1
-                        for the blank label.
-            reg: Regularizer type to use, or None for no regularizer.
-
-
         Returns:
             Keras sequential model.
 
@@ -60,11 +57,13 @@ class W2L:
 
         if self.regularizer_type:
             reg_target, reg_type, reg_edges, reg_size = self.regularizer_type.split("_")
-            reg_fn_builder = lambda n_f: sebastians_magic_trick(
-                diff_norm=reg_type, weight_norm="l2", grid_dims=GRIDS[n_f],
-                neighbor_size=int(reg_size),
-                cf=(self.cf and reg_target == "act"),
-                edges=reg_edges)
+
+            def reg_fn_builder(n_f):
+                return sebastians_magic_trick(
+                    diff_norm=reg_type, weight_norm="l2", grid_dims=GRIDS[n_f],
+                    neighbor_size=int(reg_size),
+                    cf=(self.cf and reg_target == "act"),
+                    edges=reg_edges, on_activities=reg_target == "act")
         else:
             reg_target = None
 
@@ -202,6 +201,11 @@ class W2L:
         grads = tape.gradient(loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
+        with self.writer.as_default():
+            tf.summary.scalar("loss/ctc", loss, step=self.step)
+            tf.summary.scalar("loss/nd_reg", avg_reg_loss, step=self.step)
+        self.step += 1
+
         #self.annealer.update_history(loss)
 
         return loss
@@ -217,18 +221,20 @@ class W2L:
             on_gpu: Bool, whether running on a GPU.
 
         """
-        step = 0
         # TODO more flexible checkpointing. this will simply do 10 checkpoints overall
         check_freq = steps // 10
         data_step_limited = dataset.take(steps)
 
+        # TODO use annealing
         #self.annealer = AnnealIfStuck(adam_params[0], 0.1, 20000)
         opt = tf.optimizers.Adam(*adam_params)
 
         audio_shape = [None, self.n_channels, None] if self.cf \
             else [None, None, self.n_channels]
-        train_fn = lambda w, x, y, z: self.train_step(
-            w, x, y, z, opt, on_gpu)
+
+        def train_fn(w, x, y, z):
+            return self.train_step(w, x, y, z, opt, on_gpu)
+
         graph_train = tf.function(
             train_fn, input_signature=[tf.TensorSpec(audio_shape, tf.float32),
                                        tf.TensorSpec([None], tf.int32),
@@ -240,14 +246,14 @@ class W2L:
         for features, labels in data_step_limited:
             ctc = graph_train(features["audio"], features["length"],
                               labels["transcription"], labels["length"])
-            if not step % 500:
+            if not self.step % 500:
                 stop = time.time()
-                print("Step: {}. CTC: {}".format(step, ctc.numpy()))
+                print("Step: {}. CTC: {}".format(self.step, ctc.numpy()))
                 print("{} seconds passed...".format(stop-start))
-            if not step % check_freq:
+            if not self.step % check_freq:
                 print("Saving checkpoint...")
-                self.model.save(os.path.join(self.model_dir, str(step).zfill(6) + ".h5"))
-            step += 1
+                self.model.save(os.path.join(
+                    self.model_dir, str(self.step).zfill(6) + ".h5"))
 
         self.model.save(os.path.join(self.model_dir, "final.h5"))
 
@@ -257,13 +263,14 @@ class W2L:
         Parameters:
             audio: Tensor of mel spectrograms, channels_first!
             audio_length: "True" length of each audio clip.
-            return_intermediate: Bool; if true, return intermediate layer results
-                                 in addition to the decodings.
+            return_intermediate: Bool; if true, return intermediate layer
+                                 results in addition to the decodings.
 
         Returns:
             Sparse or dense tensor with the top predictions.
-            If return_intermediate is True, output is a tuple, first element being
-            the predictions and second element a list of intermediate outputs.
+            If return_intermediate is True, output is a tuple, first element
+            being the predictions and second element a list of intermediate
+            outputs.
 
         """
         forward = self.forward(audio, training=False,
@@ -289,8 +296,8 @@ class W2L:
         """Simpler version of ctc decoder that only returns the top result.
 
         Parameters:
-            logits: Passed straight to ctc decoder. This has to be time-major and
-                    channels_last!!
+            logits: Passed straight to ctc decoder. This has to be time-major
+                    and channels_last!!
             seq_lengths: Same.
             beam_width: Same.
             pad_val: Value to use to pad dense tensor. No effect if as_sparse is
@@ -357,8 +364,8 @@ class AnnealIfStuck(tf.keras.optimizers.schedules.LearningRateSchedule):
             bias = slope_bias[1][0]
             preds = slope * x1 + bias
 
-            data_var = 1 / (self.n_steps - 2) * tf.reduce_sum(tf.square(self.loss_history -
-                                                             preds))
+            data_var = 1 / (self.n_steps - 2) * tf.reduce_sum(
+                tf.square(self.loss_history - preds))
             dist_var = 12 * data_var / (self.n_steps ** 3 - self.n_steps)
             dist = tfp.distributions.Normal(slope, tf.sqrt(dist_var),
                                             name="slope_distribution")
@@ -398,7 +405,7 @@ def dense_to_sparse(dense_tensor, sparse_val=-1):
 
 
 def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
-                           cf, edges):
+                           cf, edges, on_activities):
     """Creates a neighborhood distance regularizer.
 
     Parameters:
@@ -416,8 +423,12 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
                        as its neighborhood.
         cf: Whether the regularizer target will be channels_first. Should only
             be true if we are regularizing activation maps, not filter weights,
-            and channels_first data format is used.
+            and channels_first data format is used. If on_activities is False,
+            this is ignored.
         edges: String, how to treat edges. See CLI file for options.
+        on_activities: Bool; if True, we assume that we are working on
+                       activities, which is slightly different than when
+                       working on kernels (if False, kernels are assumed).
 
     """
     if not neighbor_size % 2:
@@ -546,24 +557,37 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
             """If cf is true we assume channels first. Otherwise last, this also
             covers the case where the inputs are filter weights!
             """
-            if not cf:
-                n_filters = inputs.shape.as_list()[-1]
+
+            # TODO mask
+            # TODO "factorize" over batch (or time?)
+            if on_activities:
+                if cf:
+                    n_filters = inputs.shape[1]
+                else:
+                    n_filters = inputs.shape[-1]
+                n_batch = inputs.shape[0]
             else:
-                n_filters = inputs.shape.as_list()[1]
+                n_filters = inputs.shape[-1]
+                n_batch = 1  # could also treat input channels as "batch axis"
             if n_filters != filters_total:
                 raise ValueError(
                     "Unsuitable grid for weight {}. "
                     "Grid dimensions: {}, {} for a total of {} entries. "
                     "Filters in weight: {}.".format(
                         inputs.name, len_x, len_y, filters_total, n_filters))
-            # reshape to n_filters x d
-            if not cf:
-                inputs = tf.reshape(inputs, [-1, n_filters])
-                inputs = tf.transpose(inputs)
-            else:
-                perm = [1, 0] + list(range(2, len(inputs.shape)))
+            # reshape to n_filters x batch x d
+            # in case of activities, d = t (or w*h or whatever)
+            # in case of kernels, d = kernel_w*in_channels and batch = 1
+            if on_activities:
+                if cf:
+                    perm = [1, 0] + list(range(2, len(inputs.shape)))
+                else:
+                    perm = [len(inputs.shape) - 1, 0] + list(range(1, len(inputs.shape) - 1))
                 inputs = tf.transpose(inputs, perm)
-                inputs = tf.reshape(inputs, [n_filters, -1])
+                inputs = tf.reshape(inputs, [n_filters, n_batch, -1])
+            else:
+                inputs = tf.reshape(inputs, [-1, n_batch, n_filters])
+                inputs = tf.transpose(inputs, [2, 1, 0])
 
             if diff_norm == "l1":
                 # to prevent weights from just shrinking (instead of getting
@@ -571,13 +595,16 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
                 # note that local normalization (normalizing each filter
                 # separately) would ignore scale differences between filters,
                 # thus not forcing them to be "equal" properly
+                # TODO maybe this makes weights too small?
+                # maybe local normalization is enough? cosine similarity
+                # basically does the same thing...
                 inputs = inputs / tf.norm(inputs, ord=1)
             elif diff_norm == "l2":
                 inputs = inputs / tf.norm(inputs)
             elif diff_norm == "linf":
                 inputs = inputs / tf.norm(inputs, ord=np.inf)
 
-            # broadcast to n_centers x 1 x d
+            # reshape to n_centers x 1 x d for broadcasting
             tf_centers = tf.gather(inputs, tf_center_ids)
             tf_centers = tf.expand_dims(tf_centers, 1)
 
@@ -601,13 +628,15 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
                 neighbor_norms = tf.norm(tf_neighbors, axis=-1)
                 # NOTE this computes cosine *similarity* which is why we
                 # multiply by -1: minimize the negative similarity!
-                cosine_similarity = dotprods / (center_norms * neighbor_norms)
+                cosine_similarity = dotprods / (center_norms * neighbor_norms +
+                                                1e-8)
                 pairwise = -1 * cosine_similarity
             else:
                 raise ValueError("Invalid difference norm specified: {}. "
                                  "Valid are 'l1', 'l2', 'linf', "
                                  "'cos'.".format(weight_norm))
-            pairwise_weighted = tf_neighbor_weights * pairwise
+            pw_mean_over_batch = tf.reduce_mean(pairwise, axis=-1)
+            pairwise_weighted = tf_neighbor_weights * pw_mean_over_batch
             return tf.reduce_sum(pairwise_weighted)
 
     return neighbor_distance
