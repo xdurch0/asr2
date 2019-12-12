@@ -21,7 +21,6 @@ class W2L:
                              "channels_last.".format(data_format))
 
         self.model_dir = model_dir
-        self.writer = tf.summary.create_file_writer(model_dir)
         self.data_format = data_format
         self.cf = self.data_format == "channels_first"
         self.n_channels = n_channels
@@ -29,7 +28,7 @@ class W2L:
         self.regularizer_type = reg[0]
         self.regularizer_coeff = reg[1]
 
-        if os.pagth.isdir(model_dir) and os.listdir(model_dir):
+        if os.path.isdir(model_dir) and os.listdir(model_dir):
             print("Model directory already exists. Loading last model...")
             last = self.get_last_model()
             self.model = tf.keras.models.load_model(
@@ -42,6 +41,8 @@ class W2L:
                 os.mkdir(model_dir)
             self.model = self.make_w2l_model()
             self.step = 0
+
+        self.writer = tf.summary.create_file_writer(model_dir)
 
     def make_w2l_model(self):
         """Creates a Keras model that does the W2L forward computation.
@@ -198,18 +199,14 @@ class W2L:
                 loss = ctc_loss + self.regularizer_coeff * avg_reg_loss
             else:
                 loss = ctc_loss
+                avg_reg_loss = 0
 
         grads = tape.gradient(loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
-        with self.writer.as_default():
-            tf.summary.scalar("loss/ctc", loss, step=self.step)
-            tf.summary.scalar("loss/nd_reg", avg_reg_loss, step=self.step)
-        self.step += 1
-
         #self.annealer.update_history(loss)
 
-        return loss
+        return loss, avg_reg_loss
 
     def train_full(self, dataset, steps, adam_params, on_gpu):
         """Full training logic for W2L.
@@ -245,16 +242,26 @@ class W2L:
 
         start = time.time()
         for features, labels in data_step_limited:
-            ctc = graph_train(features["audio"], features["length"],
-                              labels["transcription"], labels["length"])
-            if not self.step % 500:
-                stop = time.time()
-                print("Step: {}. CTC: {}".format(self.step, ctc.numpy()))
-                print("{} seconds passed...".format(stop-start))
             if not self.step % check_freq:
                 print("Saving checkpoint...")
                 self.model.save(os.path.join(
                     self.model_dir, str(self.step).zfill(6) + ".h5"))
+
+            ctc, reg_loss = graph_train(features["audio"], features["length"],
+                              labels["transcription"], labels["length"])
+
+            if not self.step % 500:
+                stop = time.time()
+                print("Step: {}. CTC: {}".format(self.step, ctc.numpy()))
+                print("{} seconds passed...".format(stop-start))
+
+            with self.writer.as_default():
+                tf.summary.scalar("loss/ctc", ctc, step=self.step)
+                if self.regularizer_coeff:
+                    tf.summary.scalar("loss/nd_reg", reg_loss,
+                                      step=self.step)
+
+            self.step += 1
 
         self.model.save(os.path.join(
             self.model_dir, str(self.step).zfill(6) + ".h5"))
@@ -598,11 +605,11 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
             # TODO maybe this makes weights too small?
             # maybe local normalization is enough? cosine similarity
             # basically does the same thing...
-            inputs = inputs / tf.norm(inputs, ord=1)
+            inputs = inputs / (tf.norm(inputs, ord=1) + 1e-8)
         elif diff_norm == "l2":
-            inputs = inputs / tf.norm(inputs)
+            inputs = inputs / (tf.norm(inputs) + 1e-8)
         elif diff_norm == "linf":
-            inputs = inputs / tf.norm(inputs, ord=np.inf)
+            inputs = inputs / (tf.norm(inputs, ord=np.inf) + 1e-8)
 
         # reshape to n_centers x 1 x d for broadcasting
         tf_centers = tf.gather(inputs, tf_center_ids)
