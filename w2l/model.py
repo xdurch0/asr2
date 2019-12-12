@@ -28,19 +28,20 @@ class W2L:
         self.vocab_size = vocab_size
         self.regularizer_type = reg[0]
         self.regularizer_coeff = reg[1]
-        self.step = 0  # TODO store this and load if resuming training
 
-        if os.path.isdir(model_dir) and os.listdir(model_dir):
+        if os.pagth.isdir(model_dir) and os.listdir(model_dir):
             print("Model directory already exists. Loading last model...")
-            last = self.get_last_model(model_dir)
+            last = self.get_last_model()
             self.model = tf.keras.models.load_model(
                 os.path.join(model_dir, last))
+            self.step = int(last[:-3])
             print("...loaded {}.".format(last))
         else:
             print("Model directory does not exist. Creating new model...")
             if not os.path.isdir(model_dir):
                 os.mkdir(model_dir)
             self.model = self.make_w2l_model()
+            self.step = 0
 
     def make_w2l_model(self):
         """Creates a Keras model that does the W2L forward computation.
@@ -255,7 +256,8 @@ class W2L:
                 self.model.save(os.path.join(
                     self.model_dir, str(self.step).zfill(6) + ".h5"))
 
-        self.model.save(os.path.join(self.model_dir, "final.h5"))
+        self.model.save(os.path.join(
+            self.model_dir, str(self.step).zfill(6) + ".h5"))
 
     def decode(self, audio, audio_length, return_intermediate=False):
         """Wrapper to decode using W2L model.
@@ -321,8 +323,8 @@ class W2L:
                                           default_value=pad_val,
                                           name="dense_decoding")
 
-    def get_last_model(self, model_dir):
-        ckpts = [file for file in os.listdir(model_dir) if file.endswith(".h5")]
+    def get_last_model(self):
+        ckpts = [file for file in os.listdir(self.model_dir) if file.endswith(".h5")]
         if "final.h5" in ckpts:
             return "final.h5"
         else:
@@ -544,99 +546,97 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
         neighbor_weights = np.tile(neighbor_weights, reps=[len(center_ids), 1])
 
     neighbor_weights /= neighbor_weights.sum()  # normalize to sum=1
-    # neighbor_weights /= np.sqrt((neighbor_weights ** 2).sum())  # normalize to length=1
 
     # now convert numpy arrays to tf constants
-    with tf.name_scope("nd_regularizer_sebastian"):
-        tf_neighbor_weights = tf.constant(neighbor_weights,
-                                          name='neighbor_weights')
-        tf_center_ids = tf.constant(center_ids, name='center_ids')
-        tf_neighbor_ids = tf.constant(neighbor_ids, name='neighbor_ids')
+    tf_neighbor_weights = tf.constant(neighbor_weights,
+                                      name='neighbor_weights')
+    tf_center_ids = tf.constant(center_ids, name='center_ids')
+    tf_neighbor_ids = tf.constant(neighbor_ids, name='neighbor_ids')
 
-        def neighbor_distance(inputs):
-            """If cf is true we assume channels first. Otherwise last, this also
-            covers the case where the inputs are filter weights!
-            """
+    def neighbor_distance(inputs):
+        """If cf is true we assume channels first. Otherwise last, this also
+        covers the case where the inputs are filter weights!
+        """
 
-            # TODO mask
-            # TODO "factorize" over batch (or time?)
-            if on_activities:
-                if cf:
-                    n_filters = inputs.shape[1]
-                else:
-                    n_filters = inputs.shape[-1]
-                n_batch = inputs.shape[0]
+        # TODO mask
+        # TODO "factorize" over batch (or time?)
+        if on_activities:
+            if cf:
+                n_filters = inputs.shape[1]
             else:
                 n_filters = inputs.shape[-1]
-                n_batch = 1  # could also treat input channels as "batch axis"
-            if n_filters != filters_total:
-                raise ValueError(
-                    "Unsuitable grid for weight {}. "
-                    "Grid dimensions: {}, {} for a total of {} entries. "
-                    "Filters in weight: {}.".format(
-                        inputs.name, len_x, len_y, filters_total, n_filters))
-            # reshape to n_filters x batch x d
-            # in case of activities, d = t (or w*h or whatever)
-            # in case of kernels, d = kernel_w*in_channels and batch = 1
-            if on_activities:
-                if cf:
-                    perm = [1, 0] + list(range(2, len(inputs.shape)))
-                else:
-                    perm = [len(inputs.shape) - 1, 0] + list(range(1, len(inputs.shape) - 1))
-                inputs = tf.transpose(inputs, perm)
-                inputs = tf.reshape(inputs, [n_filters, n_batch, -1])
+            n_batch = inputs.shape[0]
+        else:
+            n_filters = inputs.shape[-1]
+            n_batch = 1  # could also treat input channels as "batch axis"
+        if n_filters != filters_total:
+            raise ValueError(
+                "Unsuitable grid for weight {}. "
+                "Grid dimensions: {}, {} for a total of {} entries. "
+                "Filters in weight: {}.".format(
+                    inputs.name, len_x, len_y, filters_total, n_filters))
+        # reshape to n_filters x batch x d
+        # in case of activities, d = t (or w*h or whatever)
+        # in case of kernels, d = kernel_w*in_channels and batch = 1
+        if on_activities:
+            if cf:
+                perm = [1, 0] + list(range(2, len(inputs.shape)))
             else:
-                inputs = tf.reshape(inputs, [-1, n_batch, n_filters])
-                inputs = tf.transpose(inputs, [2, 1, 0])
+                perm = [len(inputs.shape) - 1, 0] + list(range(1, len(inputs.shape) - 1))
+            inputs = tf.transpose(inputs, perm)
+            inputs = tf.reshape(inputs, [n_filters, n_batch, -1])
+        else:
+            inputs = tf.reshape(inputs, [-1, n_batch, n_filters])
+            inputs = tf.transpose(inputs, [2, 1, 0])
 
-            if diff_norm == "l1":
-                # to prevent weights from just shrinking (instead of getting
-                # more similar) we apply a "global" normalization
-                # note that local normalization (normalizing each filter
-                # separately) would ignore scale differences between filters,
-                # thus not forcing them to be "equal" properly
-                # TODO maybe this makes weights too small?
-                # maybe local normalization is enough? cosine similarity
-                # basically does the same thing...
-                inputs = inputs / tf.norm(inputs, ord=1)
-            elif diff_norm == "l2":
-                inputs = inputs / tf.norm(inputs)
-            elif diff_norm == "linf":
-                inputs = inputs / tf.norm(inputs, ord=np.inf)
+        if diff_norm == "l1":
+            # to prevent weights from just shrinking (instead of getting
+            # more similar) we apply a "global" normalization
+            # note that local normalization (normalizing each filter
+            # separately) would ignore scale differences between filters,
+            # thus not forcing them to be "equal" properly
+            # TODO maybe this makes weights too small?
+            # maybe local normalization is enough? cosine similarity
+            # basically does the same thing...
+            inputs = inputs / tf.norm(inputs, ord=1)
+        elif diff_norm == "l2":
+            inputs = inputs / tf.norm(inputs)
+        elif diff_norm == "linf":
+            inputs = inputs / tf.norm(inputs, ord=np.inf)
 
-            # reshape to n_centers x 1 x d for broadcasting
-            tf_centers = tf.gather(inputs, tf_center_ids)
-            tf_centers = tf.expand_dims(tf_centers, 1)
+        # reshape to n_centers x 1 x d for broadcasting
+        tf_centers = tf.gather(inputs, tf_center_ids)
+        tf_centers = tf.expand_dims(tf_centers, 1)
 
-            # n_centers x n_neighbors x d
-            tf_neighbors = tf.gather(inputs, tf_neighbor_ids)
+        # n_centers x n_neighbors x d
+        tf_neighbors = tf.gather(inputs, tf_neighbor_ids)
 
-            # compute pairwise distances, then weight, then sum up
-            # pairwise is always n_centers x n_neighbors
-            if diff_norm == "l1":
-                pairwise = tf.reduce_sum(tf.abs(tf_centers - tf_neighbors),
-                                         axis=-1)
-            elif diff_norm == "l2":
-                pairwise = tf.sqrt(
-                    tf.reduce_sum((tf_centers - tf_neighbors)**2, axis=-1))
-            elif diff_norm == "linf":
-                pairwise = tf.reduce_max(tf.abs(tf_centers - tf_neighbors),
-                                         axis=-1)
-            elif diff_norm == "cos":
-                dotprods = tf.reduce_sum(tf_centers * tf_neighbors, axis=-1)
-                center_norms = tf.norm(tf_centers, axis=-1)
-                neighbor_norms = tf.norm(tf_neighbors, axis=-1)
-                # NOTE this computes cosine *similarity* which is why we
-                # multiply by -1: minimize the negative similarity!
-                cosine_similarity = dotprods / (center_norms * neighbor_norms +
-                                                1e-8)
-                pairwise = -1 * cosine_similarity
-            else:
-                raise ValueError("Invalid difference norm specified: {}. "
-                                 "Valid are 'l1', 'l2', 'linf', "
-                                 "'cos'.".format(weight_norm))
-            pw_mean_over_batch = tf.reduce_mean(pairwise, axis=-1)
-            pairwise_weighted = tf_neighbor_weights * pw_mean_over_batch
-            return tf.reduce_sum(pairwise_weighted)
+        # compute pairwise distances, then weight, then sum up
+        # pairwise is always n_centers x n_neighbors
+        if diff_norm == "l1":
+            pairwise = tf.reduce_sum(tf.abs(tf_centers - tf_neighbors),
+                                     axis=-1)
+        elif diff_norm == "l2":
+            pairwise = tf.sqrt(
+                tf.reduce_sum((tf_centers - tf_neighbors)**2, axis=-1))
+        elif diff_norm == "linf":
+            pairwise = tf.reduce_max(tf.abs(tf_centers - tf_neighbors),
+                                     axis=-1)
+        elif diff_norm == "cos":
+            dotprods = tf.reduce_sum(tf_centers * tf_neighbors, axis=-1)
+            center_norms = tf.norm(tf_centers, axis=-1)
+            neighbor_norms = tf.norm(tf_neighbors, axis=-1)
+            # NOTE this computes cosine *similarity* which is why we
+            # multiply by -1: minimize the negative similarity!
+            cosine_similarity = dotprods / (center_norms * neighbor_norms +
+                                            1e-8)
+            pairwise = -1 * cosine_similarity
+        else:
+            raise ValueError("Invalid difference norm specified: {}. "
+                             "Valid are 'l1', 'l2', 'linf', "
+                             "'cos'.".format(weight_norm))
+        pw_mean_over_batch = tf.reduce_mean(pairwise, axis=-1)
+        pairwise_weighted = tf_neighbor_weights * pw_mean_over_batch
+        return tf.reduce_sum(pairwise_weighted)
 
     return neighbor_distance
