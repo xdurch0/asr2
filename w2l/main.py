@@ -8,7 +8,7 @@ from .input import w2l_input_fn_npy
 def run_asr(mode, data_config, model_dir, data_format="channels_first",
             cpu=False, reg=(None, 0.),
             adam_params=(1e-4, 0.9, 0.9, 1e-8), batch_size=16, clipping=500,
-            fix_lr=False, normalize=True, steps=250000, threshold=0.,
+            fix_lr=False, normalize=True, steps=300000, threshold=0.,
             which_sets=None):
     """
     All of these parameters can be passed from w2l_cli. Please check
@@ -63,9 +63,10 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
                     predictions_repacked = dict()
                     predictions_repacked["input_length"] = features["length"][ind]
 
-                    # remove padding and convert to chars
+                    # remove padding/blank and convert to chars
                     pred = pred_batch[ind]
-                    pred = [ind for ind in pred if ind != -1]
+                    # TODO why are there blank labels here???
+                    pred = [ind for ind in pred if ind != -1 and ind != 0]
                     pred_ch = "".join([ind_to_ch[ind] for ind in pred])
                     predictions_repacked["decoding"] = pred_ch
 
@@ -86,7 +87,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
         predicted = []
         for sent_ind, p in enumerate(gen(), start=1):
             true.append(p["true"])
-            predicted.append(p["decoding"][0])
+            predicted.append(p["decoding"])
             if not sent_ind % 1000:
                 print("Went through {}...".format(sent_ind))
         ler = letter_error_rate_corpus(true, predicted)

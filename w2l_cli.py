@@ -83,7 +83,7 @@ parser.add_argument("-N", "--normalize_off",
                          "preprocessing. Check the corresponding data config.")
 parser.add_argument("-S", "--steps",
                     type=int,
-                    default=250000,
+                    default=300000,
                     help="Number of training steps to take. Default: 250000. "
                          "Ignored if doing prediction or evaluation.")
 parser.add_argument("-T", "--threshold",

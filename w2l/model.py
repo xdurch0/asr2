@@ -204,6 +204,7 @@ class W2L:
         grads = tape.gradient(loss, self.model.trainable_variables)
         optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
+        # probably has to go into train_full...
         #self.annealer.update_history(loss)
 
         return loss, avg_reg_loss
@@ -225,7 +226,12 @@ class W2L:
 
         # TODO use annealing
         #self.annealer = AnnealIfStuck(adam_params[0], 0.1, 20000)
-        opt = tf.optimizers.Adam(*adam_params)
+        # TODO don't hardcode this
+        schedule = tf.optimizers.schedules.PiecewiseConstantDecay(
+            [200000, 250000], [adam_params[0], adam_params[0]/10,
+                               adam_params[0]/5])
+        opt = tf.optimizers.Adam(schedule, *adam_params[:1])
+        opt.iterations.assign(self.step)
 
         audio_shape = [None, self.n_channels, None] if self.cf \
             else [None, None, self.n_channels]
@@ -382,6 +388,9 @@ class AnnealIfStuck(tf.keras.optimizers.schedules.LearningRateSchedule):
 
             if tf.less_equal(prob_decreasing, 0.5):
                 self.lr *= self.factor
+        return self.lr
+
+    def check_lr(self):
         return self.lr
 
     def update_history(self, new_val):
