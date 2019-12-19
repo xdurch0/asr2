@@ -229,8 +229,8 @@ class W2L:
         # TODO don't hardcode this
         schedule = tf.optimizers.schedules.PiecewiseConstantDecay(
             [200000, 250000], [adam_params[0], adam_params[0]/10,
-                               adam_params[0]/5])
-        opt = tf.optimizers.Adam(schedule, *adam_params[:1])
+                               adam_params[0]/(5*10)])
+        opt = tf.optimizers.Adam(schedule, *adam_params[1:])
         opt.iterations.assign(self.step)
 
         audio_shape = [None, self.n_channels, None] if self.cf \
