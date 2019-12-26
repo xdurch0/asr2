@@ -8,7 +8,7 @@ from .input import w2l_input_fn_npy
 def run_asr(mode, data_config, model_dir, data_format="channels_first",
             cpu=False, reg=(None, 0.),
             adam_params=(1e-4, 0.9, 0.9, 1e-8), batch_size=16, clipping=500,
-            fix_lr=False, normalize=True, steps=300000, threshold=0.,
+            fix_lr=False, normalize=False, steps=300000, threshold=0.,
             which_sets=None):
     """
     All of these parameters can be passed from w2l_cli. Please check
@@ -38,7 +38,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
         raise ValueError("Could not convert regularization coefficient '{}' "
                          "to float.".format(reg[1]))
 
-    model = W2L(model_dir, len(ch_to_ind), mel_freqs, data_format)
+    model = W2L(model_dir, len(ch_to_ind), mel_freqs, data_format, reg=reg)
 
     if mode == "return":
         return model
@@ -76,6 +76,7 @@ def run_asr(mode, data_config, model_dir, data_format="channels_first",
 
                     predictions_repacked["all_layers"] = [layer[ind] for
                                                           layer in layer_list]
+                    predictions_repacked["input"] = features["audio"]
 
                     yield predictions_repacked
 

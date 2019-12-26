@@ -31,8 +31,12 @@ class W2L:
         if os.path.isdir(model_dir) and os.listdir(model_dir):
             print("Model directory already exists. Loading last model...")
             last = self.get_last_model()
+            # TODO this is a hack!!!
+            # need to properly write the regularizer as a custom Keras object
+            # like this, continuing training will not work properly!!!
             self.model = tf.keras.models.load_model(
-                os.path.join(model_dir, last))
+                os.path.join(model_dir, last),
+                custom_objects={"neighbor_distance": lambda x: x})
             self.step = int(last[:-3])
             print("...loaded {}.".format(last))
         else:
@@ -58,14 +62,20 @@ class W2L:
         channel_ax = 1 if self.cf else -1
 
         if self.regularizer_type:
-            reg_target, reg_type, reg_edges, reg_size = self.regularizer_type.split("_")
+            #reg_target, reg_type, reg_edges, reg_size = self.regularizer_type.split("_")
+            reg_target, reg_power = self.regularizer_type.split("_")
+
+            #def reg_fn_builder(n_f):
+            #    return sebastians_magic_trick(
+            #        diff_norm=reg_type, weight_norm="l2", grid_dims=GRIDS[n_f],
+            #        neighbor_size=int(reg_size),
+            #        cf=(self.cf and reg_target == "act"),
+            #        edges=reg_edges, on_activities=reg_target == "act")
 
             def reg_fn_builder(n_f):
-                return sebastians_magic_trick(
-                    diff_norm=reg_type, weight_norm="l2", grid_dims=GRIDS[n_f],
-                    neighbor_size=int(reg_size),
-                    cf=(self.cf and reg_target == "act"),
-                    edges=reg_edges, on_activities=reg_target == "act")
+                return jens_magick_trick(
+                    grid_dims=GRIDS[n_f], cf=(self.cf and reg_target == "act"),
+                    power=float(reg_power))
         else:
             reg_target = None
 
@@ -79,6 +89,7 @@ class W2L:
                     n_f) if reg_target == "act" else None)
 
         layer_list = [
+            layers.BatchNormalization(channel_ax),
             reg_conv1d(256, 48, 2),
             layers.BatchNormalization(channel_ax),
             layers.ReLU(),
@@ -207,7 +218,7 @@ class W2L:
         # probably has to go into train_full...
         #self.annealer.update_history(loss)
 
-        return loss, avg_reg_loss
+        return ctc_loss, avg_reg_loss
 
     def train_full(self, dataset, steps, adam_params, on_gpu):
         """Full training logic for W2L.
@@ -261,11 +272,12 @@ class W2L:
                 print("Step: {}. CTC: {}".format(self.step, ctc.numpy()))
                 print("{} seconds passed...".format(stop-start))
 
-            with self.writer.as_default():
-                tf.summary.scalar("loss/ctc", ctc, step=self.step)
-                if self.regularizer_coeff:
-                    tf.summary.scalar("loss/nd_reg", reg_loss,
-                                      step=self.step)
+            if not self.step % 100:
+                with self.writer.as_default():
+                    tf.summary.scalar("loss/ctc", ctc, step=self.step)
+                    if self.regularizer_coeff:
+                        tf.summary.scalar("loss/nd_reg", reg_loss,
+                                          step=self.step)
 
             self.step += 1
 
@@ -477,8 +489,8 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
     for ci in range(filters_total):
         neighbors = []
         # derive x and y coordinate in filter space
-        cy = ci // len_x
-        cx = ci % len_x
+        cy = ci % len_y
+        cx = ci // len_y
         for offset in neighbor_offsets:
             offset_x = cx + offset[0]
             offset_y = cy + offset[1]
@@ -654,5 +666,67 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
         pw_mean_over_batch = tf.reduce_mean(pairwise, axis=-1)
         pairwise_weighted = tf_neighbor_weights * pw_mean_over_batch
         return tf.reduce_sum(pairwise_weighted)
+
+    return neighbor_distance
+
+
+def jens_magick_trick(grid_dims, cf, power=1., test=False):
+    len_x = grid_dims[0]
+    len_y = grid_dims[1]
+    filters_total = len_x * len_y
+
+    # get x,y coord in grid for each filter
+    xy_coords = []
+    for ci in range(filters_total):
+        cy = ci % len_y
+        cx = ci // len_y
+        xy_coords.append((cx, cy))
+    xy_coords = np.array(xy_coords, dtype=np.float32)
+
+    # use euclidean or whatever
+    distance_mat = np.sqrt(
+        np.sum((xy_coords[None, :] - xy_coords[:, None]) ** 2, axis=-1))
+    # distance_mat = np.sum(np.abs(xy_coords[None, :] - xy_coords[:, None]), axis=-1)
+
+    # normalize
+    # could do extremely nonlinear re-scaling, thresholding etc.
+    # for now, just scale to [-1, 1]
+    distance_mat = np.power(distance_mat, power)
+    sim_mat_g = -distance_mat
+    sim_mat_g -= sim_mat_g.min() / 2  # relies on distances being >= 0 and 0 for identical positions (main diagonal)
+    sim_mat_g /= sim_mat_g.max()
+
+    if test:
+        return distance_mat, sim_mat_g
+
+    sim_mat_g = tf.constant(sim_mat_g)
+
+    def neighbor_distance(inputs):
+        if not cf:
+            n_filters = inputs.shape.as_list()[-1]
+        else:
+            n_filters = inputs.shape.as_list()[1]
+        if n_filters != filters_total:
+            raise ValueError(
+                "Unsuitable grid for weight {}. "
+                "Grid dimensions: {}, {} for a total of {} entries. "
+                "Filters in weight: {}.".format(
+                    inputs.name, len_x, len_y, filters_total, n_filters))
+        # reshape to n_filters x d
+        if not cf:
+            inputs = tf.reshape(inputs, [-1, n_filters])
+            inputs = tf.transpose(inputs)
+        else:
+            inputs = tf.transpose(inputs, [1, 0, 2])
+            inputs = tf.reshape(inputs, [n_filters, -1])
+
+        # compute ALL similarities!!!!!!!!1
+        sim_mat = tf.matmul(inputs, tf.transpose(inputs))
+        norms = tf.norm(inputs, axis=-1)
+        sim_mat = sim_mat / (norms[tf.newaxis, :] * norms[:, tf.newaxis] + 1e-8)
+
+        sim_mat *= sim_mat_g
+
+        return -tf.reduce_mean(sim_mat)
 
     return neighbor_distance

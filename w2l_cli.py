@@ -74,10 +74,10 @@ parser.add_argument("-F", "--fix_lr",
                          "However should you restart training without this "
                          "flag, you will get whatever learning rate the "
                          "decaying process has reached at that time.")
-parser.add_argument("-N", "--normalize_off",
+parser.add_argument("-N", "--normalize",
                     action="store_true",
-                    help="Pass this to *disable* data normalization. If this "
-                         "is not given, input arrays will be individually "
+                    help="Pass this to enable data normalization. If this "
+                         "is given, input arrays will be individually "
                          "scaled to mean 0 and std 1. Keep in mind that the "
                          "data may already have been normalized in "
                          "preprocessing. Check the corresponding data config.")
@@ -119,8 +119,8 @@ else:
 
 out = run_asr(mode=args.mode, data_config=args.data_config,
               model_dir=args.model_dir,
-              data_format=args.data_format, cpu=args.cpu,
+              data_format=args.data_format, cpu=args.cpu, reg=args.reg,
               adam_params=args.adam_params, batch_size=args.batch_size,
               clipping=args.clipping, fix_lr=args.fix_lr,
-              normalize=not args.normalize_off, steps=args.steps,
+              normalize=args.normalize, steps=args.steps,
               threshold=args.threshold, which_sets=which_sets)
