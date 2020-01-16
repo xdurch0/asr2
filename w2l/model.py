@@ -100,7 +100,8 @@ class W2L:
                 return tf.where(tf.greater(dy, 1.), 0., dy)
 
             return tf.where(tf.greater_equal(inp, 0.), 1., -1.), straight_through
-        #git resact = layers.Lambda(binarizer)
+        #actfn = layers.Lambda(binarizer)
+        #def act(n_f): return layers.Lambda(binarizer)
 
         layer_list = [
             layers.BatchNormalization(channel_ax),
@@ -682,7 +683,7 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
 
         # keras divides activity regularizer by batch size.....
         # so we counteract that there
-        factor = tf.cast(tf.shape(inputs[0]), tf.float32) if on_activities else 1.
+        factor = tf.cast(tf.shape(inputs)[0], tf.float32) if on_activities else 1.
         return factor * tf.reduce_sum(pairwise_weighted)
 
     return neighbor_distance
@@ -725,7 +726,7 @@ def jens_magick_trick(grid_dims, cf, on_activities, power=1., test=False):
                 n_filters = inputs.shape[1]
             else:
                 n_filters = inputs.shape[-1]
-            n_batch = inputs.shape[0]
+            n_batch = tf.shape(inputs)[0]
         else:
             n_filters = inputs.shape[-1]
             n_batch = 1  # could also treat input channels as "batch axis"
@@ -755,7 +756,7 @@ def jens_magick_trick(grid_dims, cf, on_activities, power=1., test=False):
         sim_mat *= sim_mat_g
         # keras divides activity regularizer by batch size.....
         # so we counteract that there
-        factor = tf.cast(tf.shape(inputs[0]), tf.float32) if on_activities else 1.
-        return factor * -tf.reduce_mean(sim_mat)
+        factor = tf.cast(tf.shape(inputs)[0], tf.float32) if on_activities else 1.
+        return factor * -tf.reduce_mean(sim_mat) / tf.reduce_mean(sim_mat_g)
 
     return neighbor_distance
