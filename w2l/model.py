@@ -89,41 +89,53 @@ class W2L:
                 activity_regularizer=reg_fn_builder(
                     n_f) if reg_target == "act" else None)
 
+        def act(n_f):
+            return layers.ReLU(activity_regularizer=reg_fn_builder(
+                    n_f) if reg_target == "act" else None)
+
+        @tf.custom_gradient
+        def binarizer(inp):
+            def straight_through(dy):
+                return tf.where(tf.greater(dy, 1.), 0., dy)
+
+            return tf.where(tf.greater_equal(inp, 0.), 1., -1.), straight_through
+        #git resact = layers.Lambda(binarizer)
+
         layer_list = [
             layers.BatchNormalization(channel_ax),
             reg_conv1d(256, 48, 2),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(256, 7, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(256),
             reg_conv1d(2048, 32, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(2048),
             reg_conv1d(2048, 1, 1),
             layers.BatchNormalization(channel_ax),
-            layers.ReLU(),
+            act(2048),
             layers.Conv1D(self.vocab_size + 1, 1, 1, "same", self.data_format)
             ]
 
