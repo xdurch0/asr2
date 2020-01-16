@@ -28,22 +28,23 @@ class W2L:
         self.regularizer_type = reg[0]
         self.regularizer_coeff = reg[1]
 
+        self.model = self.make_w2l_model()
         if os.path.isdir(model_dir) and os.listdir(model_dir):
             print("Model directory already exists. Loading last model...")
             last = self.get_last_model()
             # TODO this is a hack!!!
             # need to properly write the regularizer as a custom Keras object
             # like this, continuing training will not work properly!!!
-            self.model = tf.keras.models.load_model(
-                os.path.join(model_dir, last),
-                custom_objects={"neighbor_distance": lambda x: x})
+            #self.model = tf.keras.models.load_model(
+            #    os.path.join(model_dir, last),
+            #    custom_objects={"neighbor_distance": lambda x: x})
+            self.model.load_weights(os.path.join(model_dir, last))
             self.step = int(last[:-3])
             print("...loaded {}.".format(last))
         else:
             print("Model directory does not exist. Creating new model...")
             if not os.path.isdir(model_dir):
                 os.mkdir(model_dir)
-            self.model = self.make_w2l_model()
             self.step = 0
 
         self.writer = tf.summary.create_file_writer(model_dir)
@@ -134,7 +135,7 @@ class W2L:
         for layer in layer_list:
             layer_outputs.append(layer(layer_outputs[-1]))
         # only include relu layers in outputs
-        relevant = layer_outputs[3::3] + [layer_outputs[-1]]
+        relevant = layer_outputs[4::3] + [layer_outputs[-1]]
 
         w2l = tf.keras.Model(inputs=inp, outputs=relevant)
 
@@ -281,7 +282,7 @@ class W2L:
 
             self.step += 1
 
-        self.model.save(os.path.join(
+        self.model.save_weights(os.path.join(
             self.model_dir, str(self.step).zfill(6) + ".h5"))
 
     def decode(self, audio, audio_length, return_intermediate=False):
@@ -378,7 +379,7 @@ class AnnealIfStuck(tf.keras.optimizers.schedules.LearningRateSchedule):
             name="loss_history")
 
     def __call__(self, step):
-        if tf.logical_or(tf.greater(tf.mod(step, self.n_steps), 0),
+        if tf.logical_or(tf.greater(tf.math.mod(step, self.n_steps), 0),
                          tf.equal(step, 0)):
             pass
         else:
