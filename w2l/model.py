@@ -76,6 +76,7 @@ class W2L:
             def reg_fn_builder(n_f):
                 return jens_magick_trick(
                     grid_dims=GRIDS[n_f], cf=(self.cf and reg_target == "act"),
+                    on_activities=reg_target == "act",
                     power=float(reg_power))
         else:
             reg_target = None
@@ -678,12 +679,16 @@ def sebastians_magic_trick(diff_norm, weight_norm, grid_dims, neighbor_size,
                              "'cos'.".format(weight_norm))
         pw_mean_over_batch = tf.reduce_mean(pairwise, axis=-1)
         pairwise_weighted = tf_neighbor_weights * pw_mean_over_batch
-        return tf.reduce_sum(pairwise_weighted)
+
+        # keras divides activity regularizer by batch size.....
+        # so we counteract that there
+        factor = tf.cast(tf.shape(inputs[0]), tf.float32) if on_activities else 1.
+        return factor * tf.reduce_sum(pairwise_weighted)
 
     return neighbor_distance
 
 
-def jens_magick_trick(grid_dims, cf, power=1., test=False):
+def jens_magick_trick(grid_dims, cf, on_activities, power=1., test=False):
     len_x = grid_dims[0]
     len_y = grid_dims[1]
     filters_total = len_x * len_y
@@ -706,7 +711,7 @@ def jens_magick_trick(grid_dims, cf, power=1., test=False):
     # for now, just scale to [-1, 1]
     distance_mat = np.power(distance_mat, power)
     sim_mat_g = -distance_mat
-    sim_mat_g -= sim_mat_g.min() / 2  # relies on distances being >= 0 and 0 for identical positions (main diagonal)
+    sim_mat_g -= sim_mat_g.min()  # relies on distances being >= 0 and 0 for identical positions (main diagonal)
     sim_mat_g /= sim_mat_g.max()
 
     if test:
@@ -715,31 +720,42 @@ def jens_magick_trick(grid_dims, cf, power=1., test=False):
     sim_mat_g = tf.constant(sim_mat_g)
 
     def neighbor_distance(inputs):
-        if not cf:
-            n_filters = inputs.shape.as_list()[-1]
+        if on_activities:
+            if cf:
+                n_filters = inputs.shape[1]
+            else:
+                n_filters = inputs.shape[-1]
+            n_batch = inputs.shape[0]
         else:
-            n_filters = inputs.shape.as_list()[1]
+            n_filters = inputs.shape[-1]
+            n_batch = 1  # could also treat input channels as "batch axis"
         if n_filters != filters_total:
             raise ValueError(
                 "Unsuitable grid for weight {}. "
                 "Grid dimensions: {}, {} for a total of {} entries. "
                 "Filters in weight: {}.".format(
                     inputs.name, len_x, len_y, filters_total, n_filters))
-        # reshape to n_filters x d
-        if not cf:
-            inputs = tf.reshape(inputs, [-1, n_filters])
-            inputs = tf.transpose(inputs)
+        # reshape to n_filters x batch x d
+        # in case of activities, d = t (or w*h or whatever)
+        # in case of kernels, d = kernel_w*in_channels and batch = 1
+        if on_activities:
+            if not cf:
+                perm = [0, len(inputs.shape) - 1] + list(range(1, len(inputs.shape) - 1))
+                inputs = tf.transpose(inputs, perm)
+            inputs = tf.reshape(inputs, [n_batch, n_filters, -1])
         else:
-            inputs = tf.transpose(inputs, [1, 0, 2])
-            inputs = tf.reshape(inputs, [n_filters, -1])
+            inputs = tf.reshape(inputs, [-1, n_batch, n_filters])
+            inputs = tf.transpose(inputs, [1, 2, 0])
 
         # compute ALL similarities!!!!!!!!1
-        sim_mat = tf.matmul(inputs, tf.transpose(inputs))
+        sim_mat = tf.matmul(inputs, tf.transpose(inputs, [0, 2, 1]))
         norms = tf.norm(inputs, axis=-1)
-        sim_mat = sim_mat / (norms[tf.newaxis, :] * norms[:, tf.newaxis] + 1e-8)
+        sim_mat = sim_mat / (norms[:, tf.newaxis, :] * norms[:, :, tf.newaxis] + 1e-8)
 
         sim_mat *= sim_mat_g
-
-        return -tf.reduce_mean(sim_mat)
+        # keras divides activity regularizer by batch size.....
+        # so we counteract that there
+        factor = tf.cast(tf.shape(inputs[0]), tf.float32) if on_activities else 1.
+        return factor * -tf.reduce_mean(sim_mat)
 
     return neighbor_distance
